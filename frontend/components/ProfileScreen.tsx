@@ -18,12 +18,20 @@ interface ProfileProps {
   error: string;
 }
 
-function KeyExportBox({ privateKey }: { privateKey: string }) {
+function KeyExportBox() {
   const [revealed, setRevealed] = useState(false);
   const [copied, setCopied]     = useState(false);
+  const [privateKey, setPrivateKey] = useState("");
+
+  useEffect(() => {
+    // Read directly from localStorage every time revealed changes
+    const k = localStorage.getItem("cc_private_key") || "";
+    setPrivateKey(k);
+  }, [revealed]);
 
   function copyKey() {
-    navigator.clipboard.writeText(privateKey).then(() => {
+    const k = localStorage.getItem("cc_private_key") || "";
+    navigator.clipboard.writeText(k).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     });
@@ -34,8 +42,8 @@ function KeyExportBox({ privateKey }: { privateKey: string }) {
       style={{
         background: "var(--surface)",
         border: "1px solid var(--border)",
-        borderRadius: "var(--radius-lg)",
-        padding: "18px",
+        borderRadius: "var(--r-lg)",
+        padding: "20px",
         display: "flex",
         flexDirection: "column",
         gap: "12px",
@@ -45,7 +53,7 @@ function KeyExportBox({ privateKey }: { privateKey: string }) {
       <div
         style={{
           fontSize: "13px",
-          color: "var(--text-secondary)",
+          color: "var(--text-2)",
           lineHeight: 1.5,
         }}
       >
@@ -62,21 +70,22 @@ function KeyExportBox({ privateKey }: { privateKey: string }) {
           🔑 Reveal Private Key
         </button>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
           <div
             style={{
-              padding: "12px 14px",
+              padding: "14px 16px",
               background: "var(--surface-2)",
               border: "1px solid var(--broken-border)",
-              borderRadius: "var(--radius)",
+              borderRadius: "var(--r)",
               fontFamily: "var(--font-mono)",
               fontSize: "11px",
               color: "var(--broken)",
               wordBreak: "break-all",
-              lineHeight: 1.6,
+              lineHeight: 1.8,
+              userSelect: "all",
             }}
           >
-            {privateKey}
+            {privateKey || "Key not found — try refreshing"}
           </div>
           <div style={{ display: "flex", gap: "8px" }}>
             <button
@@ -85,9 +94,10 @@ function KeyExportBox({ privateKey }: { privateKey: string }) {
               style={{
                 flex: 1,
                 fontSize: "13px",
-                padding: "8px 12px",
+                padding: "10px 12px",
                 color: copied ? "var(--kept)" : undefined,
                 borderColor: copied ? "var(--kept-border)" : undefined,
+                background: copied ? "var(--kept-bg)" : undefined,
               }}
             >
               {copied ? "✓ Copied!" : "Copy Key"}
@@ -95,15 +105,12 @@ function KeyExportBox({ privateKey }: { privateKey: string }) {
             <button
               className="btn-outline"
               onClick={() => setRevealed(false)}
-              style={{ flex: 1, fontSize: "13px", padding: "8px 12px" }}
+              style={{ flex: 1, fontSize: "13px", padding: "10px 12px" }}
             >
               Hide
             </button>
           </div>
-          <div
-            className="info-box info-box--warn"
-            style={{ fontSize: "12px" }}
-          >
+          <div className="info-box info-box--warn" style={{ fontSize: "12px" }}>
             ⚠️ Anyone with this key controls your identity. Store it safely.
           </div>
         </div>
@@ -125,14 +132,10 @@ export default function ProfileScreen({
   error,
 }: ProfileProps) {
   const [copied, setCopied] = useState(false);
-  const [privateKey, setPrivateKey] = useState("");
 
   useEffect(() => {
     onLoad();
     if (myCommitments.length === 0) onLoadMyCommitments();
-    // Get private key for export
-    const k = localStorage.getItem("cc_private_key") || "";
-    setPrivateKey(k);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -157,7 +160,7 @@ export default function ProfileScreen({
     .slice(0, 6);
 
   return (
-    <div className="screen fadeIn" style={{ paddingBottom: "80px" }}>
+    <div className="fadeIn" style={{ display: "flex", flexDirection: "column", gap: "20px", paddingBottom: "80px" }}>
 
       {/* ── Header ── */}
       <h2 className="screen-title">Profile</h2>
@@ -167,7 +170,7 @@ export default function ProfileScreen({
         style={{
           background: "var(--surface)",
           border: "1px solid var(--border)",
-          borderRadius: "var(--radius-xl)",
+          borderRadius: "var(--r-xl)",
           padding: "24px 20px",
           display: "flex",
           flexDirection: "column",
@@ -200,7 +203,7 @@ export default function ProfileScreen({
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            fontFamily: "var(--font-serif)",
+            fontFamily: "var(--font-display)",
             fontSize: "1.6rem",
             color: "var(--accent)",
           }}
@@ -240,7 +243,7 @@ export default function ProfileScreen({
                 display: "flex",
                 justifyContent: "space-between",
                 fontSize: "12px",
-                color: "var(--text-muted)",
+                color: "var(--text-3)",
               }}
             >
               <span>Completion rate</span>
@@ -295,7 +298,7 @@ export default function ProfileScreen({
             {profile.longest_streak > 0 && (
               <div className="streak-sub">
                 Best:{" "}
-                <strong style={{ color: "var(--text-secondary)" }}>
+                <strong style={{ color: "var(--text-2)" }}>
                   {profile.longest_streak}
                 </strong>
               </div>
@@ -332,9 +335,9 @@ export default function ProfileScreen({
               padding: "12px 16px",
               background: "var(--surface)",
               border: "1px solid var(--border)",
-              borderRadius: "var(--radius)",
+              borderRadius: "var(--r)",
               fontSize: "13px",
-              color: "var(--text-secondary)",
+              color: "var(--text-2)",
             }}
           >
             <span>Total commitments</span>
@@ -349,7 +352,7 @@ export default function ProfileScreen({
               padding: "14px 16px",
               background: "var(--surface)",
               border: "1px solid var(--border)",
-              borderRadius: "var(--radius-lg)",
+              borderRadius: "var(--r-lg)",
               display: "flex",
               flexDirection: "column",
               gap: "8px",
@@ -367,13 +370,13 @@ export default function ProfileScreen({
                   display: "flex",
                   gap: "10px",
                   fontSize: "13px",
-                  color: "var(--text-secondary)",
+                  color: "var(--text-2)",
                   alignItems: "center",
                 }}
               >
                 <span
                   style={{
-                    fontFamily: "var(--font-serif)",
+                    fontFamily: "var(--font-display)",
                     fontSize: "1rem",
                     color: color as string,
                     minWidth: "16px",
@@ -427,7 +430,7 @@ export default function ProfileScreen({
                     padding: "12px 14px",
                     background: "var(--surface)",
                     border: "1px solid var(--border)",
-                    borderRadius: "var(--radius-lg)",
+                    borderRadius: "var(--r-lg)",
                     cursor: "pointer",
                     transition: "border-color 0.15s",
                   }}
@@ -443,7 +446,7 @@ export default function ProfileScreen({
                   {v && (
                     <span
                       style={{
-                        fontFamily: "var(--font-serif)",
+                        fontFamily: "var(--font-display)",
                         fontSize: "1.4rem",
                         color: v.color,
                         flexShrink: 0,
@@ -472,7 +475,7 @@ export default function ProfileScreen({
                     <div
                       style={{
                         fontSize: "11px",
-                        color: "var(--text-muted)",
+                        color: "var(--text-3)",
                         marginTop: "2px",
                         display: "flex",
                         gap: "8px",
@@ -492,7 +495,7 @@ export default function ProfileScreen({
       {error && <p className="error-text">{error}</p>}
 
       {/* ── Key export ── */}
-      {privateKey && <KeyExportBox privateKey={privateKey} />}
+      <KeyExportBox />
     </div>
   );
 }
