@@ -1,5 +1,6 @@
 "use client";
 // CommitChain — Main Orchestrator
+// Updated: submitProof no longer passes owner_address (authenticated on-chain)
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Screen, Commitment, Profile, Category, isExpired } from "../types";
@@ -167,7 +168,16 @@ export default function App() {
     const acc = getAccount();
     const proofDeadline = addHours(params.commitmentDeadline, 48);
     try {
-      const id = await createCommitment(acc, acc.address, playerName || "Anonymous", params.goalText, params.criteriaText, params.category, params.commitmentDeadline, proofDeadline);
+      const id = await createCommitment(
+        acc,
+        acc.address,
+        playerName || "Anonymous",
+        params.goalText,
+        params.criteriaText,
+        params.category,
+        params.commitmentDeadline,
+        proofDeadline
+      );
       if (!id) throw new Error("Commitment not created — you may already have 5 open commitments.");
       const data = await getCommitment(id);
       setCommitment(data);
@@ -183,15 +193,47 @@ export default function App() {
   }
 
   // ── Submit proof ─────────────────────────────────────────────────
+  // CHANGED: owner_address is no longer passed to submitProof.
+  // The contract authenticates the tx sender on-chain via gl.message.sender_address.
+  // If the proof is submitted outside the allowed window (after commitment deadline,
+  // before proof deadline closes) the contract silently returns and no state change
+  // occurs. The frontend re-fetches to detect this and shows an appropriate error.
   async function handleSubmitProof(params: { proofText: string; proofLink: string; }) {
     if (!activeCommitmentId) return;
     setLoading("Submitting proof…");
     setError("");
     const acc = getAccount();
     try {
-      await submitProof(acc, activeCommitmentId, acc.address, params.proofText, params.proofLink);
+      await submitProof(acc, activeCommitmentId, params.proofText, params.proofLink);
+
+      // Re-fetch to verify the contract actually accepted the submission.
+      // If the contract silently rejected it (wrong sender, deadline not met),
+      // status will still be "committed" — we surface a clear error.
       const data = await getCommitment(activeCommitmentId);
       setCommitment(data);
+
+      if (data.status !== "evaluating") {
+        // Contract rejected the submission. Most likely causes:
+        // 1. Commitment deadline hasn't passed yet (too early to submit proof)
+        // 2. Proof window has already closed (too late)
+        // 3. Transaction signed by a different key than the owner
+        const today = new Date().toISOString().split("T")[0];
+        const commitDeadline = data.commitment_deadline;
+        const proofDeadline = data.proof_deadline?.split("T")[0] ?? "";
+
+        let reason = "Proof submission was rejected by the contract.";
+        if (today <= commitDeadline) {
+          reason = "Your commitment deadline hasn't passed yet. You can only submit proof after your deadline date.";
+        } else if (proofDeadline && today > proofDeadline) {
+          reason = "The 48-hour proof window has closed. This commitment will be marked BROKEN.";
+        }
+
+        setError(reason);
+        setLoading("");
+        navigate("submit_proof");
+        return;
+      }
+
       setLoading("");
       navigate("judging");
       if (!calculatingRef.current) {
@@ -212,8 +254,16 @@ export default function App() {
     const acc = getAccount();
     try {
       await checkExpired(acc, commitmentId);
+      // Re-fetch and check — contract silently rejects if deadline hasn't passed
       const data = await getCommitment(commitmentId);
       setCommitment(data);
+
+      if (data.status !== "resolved") {
+        setError("Cannot mark as expired yet — the proof window hasn't closed.");
+        setLoading("");
+        return;
+      }
+
       getMyCommitments(acc.address).then(setMyCommitments).catch(() => {});
     } catch {
       setError("Failed to mark expired. Try again.");
@@ -230,7 +280,6 @@ export default function App() {
     finally { setLoading(""); }
   }
 
-  // ── Profile — silent on first load for new users ─────────────────
   async function handleLoadProfile(address?: string, silent = false) {
     const addr = address || playerAddress;
     if (!addr) return;
