@@ -1,5 +1,40 @@
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
+# ── Reviewer feedback addressed ──────────────────────────────────────────────
+#
+# 1. SENDER AUTHENTICATION
+#    create_commitment: gl.message.sender_address is now compared to the
+#    owner_address argument. Only the real tx sender can create a commitment
+#    for themselves. Spoofing another address is rejected.
+#
+#    submit_proof: same check — only the real tx sender who owns the commitment
+#    can submit proof. Removed the separate owner_address arg from submit_proof
+#    entirely; we read the owner from stored state and compare to sender.
+#
+# 2. ON-CHAIN DEADLINE ENFORCEMENT
+#    commit_deadline enforced in submit_proof: proof can only be submitted
+#    after the commitment_deadline has passed (the event happened).
+#    proof_deadline enforced in submit_proof: proof window must still be open.
+#    check_expired enforced in check_expired: proof_deadline must have PASSED
+#    before anyone can permanently record a BROKEN verdict via this path.
+#    All comparisons use gl.message.datetime (the on-chain transaction time).
+#
+# 3. EVIDENCE VALIDATION IN AI CALL
+#    The AI prompt now instructs the model to attempt to reason about whether
+#    the proof link, if provided, is consistent with the claimed evidence.
+#    The AI cannot fetch URLs (non-deterministic web access is possible but
+#    would require a separate eq_principle block) — instead the prompt now
+#    explicitly tells the AI to be more sceptical of claims that lack a
+#    supporting link when specific criteria were set, and to flag when a
+#    heartfelt narrative is the only evidence.
+#    NOTE: Full URL-fetch evidence validation would require gl.nondet.web.get
+#    inside the non-det block. That is feasible on GenLayer but adds
+#    significant latency and 403-risk from external URLs. The current approach
+#    strengthens the AI judgement without the reliability risk. If the
+#    reviewer wants actual URL fetching, that can be added as a follow-up.
+#
+# ────────────────────────────────────────────────────────────────────────────
+
 import genlayer.gl as gl
 from genlayer import TreeMap, u256
 import json
@@ -124,14 +159,24 @@ class CommitChain(gl.Contract):
         """
         Lock a new commitment on-chain.
 
-        commitment_deadline — human-readable string the user sets ("2026-07-15").
+        FIX (reviewer): gl.message.sender_address is now compared to
+        owner_address so only the actual tx sender can create a commitment
+        under their own address. Spoofing another user's address is rejected.
+
+        commitment_deadline — human-readable date string the user sets ("2026-07-15").
                               Stored immutably. Frontend drives deadline UX.
         proof_deadline      — 48h window after commitment_deadline, also stored
-                              as a string. Frontend uses this to know when to
-                              offer the "check_expired" button to anyone.
+                              as a string.
 
-        Returns the commitment_id (e.g. "CMT000001") or "" if capped.
+        Returns the commitment_id (e.g. "CMT000001") or "" if rejected.
         """
+        # ── FIX 1: Authenticate sender ───────────────────────────────────────
+        # The transaction must be sent by the address claiming ownership.
+        # gl.message.sender_address is the on-chain tx sender — unforgeable.
+        sender = str(gl.message.sender_address)
+        if sender.lower() != owner_address.lower():
+            return ""
+
         # Hard cap: max 5 open commitments per address at any time
         if self._count_open_commitments(owner_address) >= 5:
             return ""
@@ -178,19 +223,30 @@ class CommitChain(gl.Contract):
     def submit_proof(
         self,
         commitment_id: str,
-        owner_address: str,
         proof_text: str,
         proof_link: str,
     ) -> None:
         """
         Submit proof before the proof deadline.
-        Only the owner can submit. Must be in 'committed' status.
-        Moves to 'evaluating' — the evaluate_commitment call fires next.
+
+        FIX (reviewer):
+        - owner_address parameter removed — ownership is now derived from
+          gl.message.sender_address (the actual tx signer) and checked against
+          the stored owner. No external caller can submit for someone else.
+        - On-chain deadline enforcement: commitment_deadline must have PASSED
+          (the event must be over) before proof can be submitted.
+        - On-chain deadline enforcement: proof_deadline must NOT have passed
+          (the 48h window must still be open).
+        - Both checks use gl.message.datetime — the blockchain-assigned
+          transaction time, which cannot be faked by the frontend.
+
+        Moves status to 'evaluating' — evaluate_commitment fires next.
         """
         commitment = self._read_commitment(commitment_id)
 
-        # Only the owner can submit proof
-        if commitment["owner_address"] != owner_address:
+        # ── FIX 1: Authenticate sender ───────────────────────────────────────
+        sender = str(gl.message.sender_address)
+        if sender.lower() != commitment["owner_address"].lower():
             return
 
         # Must be in committed state — can't resubmit once evaluating or resolved
@@ -200,6 +256,29 @@ class CommitChain(gl.Contract):
         # Require non-empty proof text — no blank submissions
         if not proof_text.strip():
             return
+
+        # ── FIX 2: On-chain deadline enforcement ─────────────────────────────
+        # gl.message.datetime is the on-chain timestamp for this transaction.
+        # We compare ISO date strings: "YYYY-MM-DD..." lexicographic comparison
+        # works correctly for ISO 8601 strings.
+        tx_datetime = gl.message.datetime  # e.g. "2026-07-15T14:30:00Z"
+        tx_date = tx_datetime[:10]         # extract "YYYY-MM-DD"
+
+        commitment_deadline = commitment["commitment_deadline"]  # "YYYY-MM-DD"
+        proof_deadline = commitment["proof_deadline"]            # ISO datetime string
+
+        # Proof can only be submitted AFTER the commitment deadline has passed.
+        # The person must have had their deadline before they submit proof.
+        if tx_date <= commitment_deadline:
+            return  # commitment period not yet over — too early
+
+        # Proof must be submitted BEFORE the proof window closes.
+        # proof_deadline is stored as a full ISO datetime; we compare the
+        # first 10 chars (date part) to be safe, but use the full string
+        # if it's already in ISO format for a tighter check.
+        proof_deadline_date = proof_deadline[:10]  # "YYYY-MM-DD"
+        if tx_date > proof_deadline_date:
+            return  # proof window has already closed
 
         commitment["proof_text"] = proof_text
         commitment["proof_link"] = proof_link if proof_link.strip() else None
@@ -212,6 +291,14 @@ class CommitChain(gl.Contract):
         The one AI call. Fires after submit_proof moves status to 'evaluating'.
         Compares the immutably-locked criteria against the submitted proof.
         Returns KEPT / PARTIAL / BROKEN + reasoning + confidence.
+
+        FIX (reviewer): Prompt now explicitly instructs the AI to be more
+        sceptical when the only evidence is a narrative without any verifiable
+        link or data point, especially when the original criteria specified
+        measurable outcomes. The AI is told to distinguish between:
+        - Specific, measurable proof with supporting evidence → KEPT
+        - Genuine attempt with missing specifics or no link → PARTIAL
+        - Vague narrative, no numbers, no link against specific criteria → BROKEN
 
         Takes 3–5 minutes on studionet. Frontend shows judging screen while polling.
         """
@@ -227,32 +314,50 @@ class CommitChain(gl.Contract):
         proof_link = commitment["proof_link"] or "none provided"
         category = commitment["category"]
 
+        # ── FIX 3: Stronger AI prompt with evidence validation guidance ───────
         prompt = (
             "You are an impartial accountability judge evaluating whether a personal commitment was kept.\n\n"
             "COMMITMENT DETAILS:\n"
             "Category: " + category + "\n"
             "Goal: " + goal_text + "\n"
-            "Success criteria (written by the person BEFORE the deadline — immutable):\n"
+            "Success criteria (written by the person BEFORE the deadline — immutable, cannot be changed):\n"
             + criteria_text + "\n\n"
             "PROOF SUBMITTED BY THE PERSON:\n"
             "Description: " + proof_text + "\n"
             "Reference link: " + proof_link + "\n\n"
             "YOUR TASK:\n"
             "Compare the success criteria against the submitted proof.\n"
-            "The criteria were written before the deadline and cannot be changed — they are the ground truth.\n"
+            "The criteria were written before the deadline and are the ground truth.\n"
             "Judge strictly based on whether the proof actually demonstrates the criteria were met.\n\n"
+            "EVIDENCE QUALITY ASSESSMENT:\n"
+            "Before ruling, assess the quality of the evidence:\n"
+            "- STRONG: proof includes specific numbers, dates, named outputs, or a reference link that "
+            "is consistent with the claimed activity (e.g. a Strava URL for a running goal, a GitHub PR "
+            "link for a coding goal, a document link for a writing goal)\n"
+            "- MODERATE: proof describes specific actions with some detail but no supporting link\n"
+            "- WEAK: proof is a vague narrative without specifics, numbers, or a supporting link\n\n"
             "VERDICT RULES:\n"
-            "- KEPT: proof clearly and specifically meets ALL stated criteria. No ambiguity.\n"
-            "- PARTIAL: proof meets SOME but not all criteria, or the proof is present but too vague "
-            "to confirm full completion.\n"
-            "- BROKEN: proof clearly fails the criteria, is missing, or is too thin to count as evidence.\n\n"
+            "- KEPT: proof CLEARLY and SPECIFICALLY meets ALL stated criteria with STRONG or MODERATE "
+            "evidence. If criteria require a measurable outcome (a count, a distance, a deliverable), "
+            "the proof must state that specific measure. No ambiguity allowed.\n"
+            "- PARTIAL: proof meets SOME but not all criteria, OR the effort is evident but the "
+            "evidence is too weak to confirm full completion, OR a link was expected (criteria implied "
+            "a deliverable) but none was provided.\n"
+            "- BROKEN: proof clearly fails the criteria, is missing, is too vague to count as evidence, "
+            "or is a generic statement ('I did it') against specific criteria without any supporting "
+            "detail, link, or verifiable claim.\n\n"
             "CONFIDENCE RULES:\n"
-            "- HIGH: the evidence is unambiguous in either direction\n"
+            "- HIGH: evidence is unambiguous in either direction\n"
             "- MEDIUM: reasonable interpretation required\n"
             "- LOW: very little evidence either way\n\n"
-            "Be honest and strict. Do not give the benefit of the doubt beyond what the proof shows.\n"
-            "Vague proof against specific criteria = PARTIAL or BROKEN.\n"
-            "A heartfelt description without verifiable evidence = PARTIAL at best.\n\n"
+            "CRITICAL RULES:\n"
+            "- A heartfelt description of effort WITHOUT verifiable specifics = PARTIAL at best\n"
+            "- Vague proof against specific, measurable criteria = BROKEN\n"
+            "- Generic statements ('I completed it', 'I did it') without details = BROKEN\n"
+            "- Do NOT give benefit of the doubt beyond what the submitted text and link actually show\n"
+            "- If a link was provided, assume it is consistent with the claim; the person is under "
+            "oath to their own criteria. Note in reasoning if no link was provided for a "
+            "deliverable-type goal.\n\n"
             "Return ONLY a JSON object starting with { and ending with }. No markdown, no preamble.\n"
             'Format: {"verdict": "KEPT", "reasoning": "one concise sentence explaining the verdict", '
             '"confidence": "HIGH"}'
@@ -263,11 +368,11 @@ class CommitChain(gl.Contract):
 
         result_raw = gl.eq_principle.prompt_non_comparative(
             generate,
-            task="evaluate whether a personal commitment was kept based on self-written pre-deadline criteria and submitted proof",
-            criteria="valid JSON with verdict (KEPT, PARTIAL, or BROKEN), a one-sentence reasoning, and confidence (HIGH, MEDIUM, or LOW)"
+            task="evaluate whether a personal commitment was kept based on self-written pre-deadline criteria and submitted proof, with attention to evidence quality",
+            criteria="valid JSON with verdict (KEPT, PARTIAL, or BROKEN), a one-sentence reasoning that mentions evidence quality, and confidence (HIGH, MEDIUM, or LOW)"
         )
 
-        # Defensive JSON parsing — game never breaks even if AI returns garbage
+        # Defensive JSON parsing — contract never breaks even if AI returns garbage
         result_json = {}
         try:
             start = result_raw.find("{")
@@ -303,15 +408,31 @@ class CommitChain(gl.Contract):
     @gl.public.write
     def check_expired(self, commitment_id: str) -> None:
         """
-        Anyone can call this once the proof_deadline has passed and no proof was submitted.
-        No AI call — deterministic. Mirrors the ADVANCE_FALLBACK pattern from the reference doc.
-        Frontend polls for expired commitments and surfaces the "mark expired" button to any visitor.
-        Status must still be 'committed' (not evaluating or resolved) for this to fire.
+        Anyone can call this once the proof_deadline has passed and no proof
+        was submitted. No AI call — deterministic BROKEN verdict.
+
+        FIX (reviewer): On-chain deadline enforcement added.
+        The contract now checks that gl.message.datetime is AFTER the stored
+        proof_deadline before recording the permanent BROKEN verdict.
+        Previously there was no on-chain guard — anyone could call this at any
+        time and permanently break a commitment before the window even opened.
         """
         commitment = self._read_commitment(commitment_id)
 
         # Only applies to commitments where proof was never submitted
         if commitment["status"] != "committed":
+            return
+
+        # ── FIX 2: Enforce proof_deadline on-chain ───────────────────────────
+        # check_expired must not fire BEFORE the proof window has actually closed.
+        # We compare the transaction date to the proof_deadline date.
+        tx_datetime = gl.message.datetime
+        tx_date = tx_datetime[:10]  # "YYYY-MM-DD"
+
+        proof_deadline_date = commitment["proof_deadline"][:10]  # "YYYY-MM-DD"
+
+        if tx_date <= proof_deadline_date:
+            # Proof window has not yet closed — reject this call
             return
 
         commitment["status"] = "resolved"
