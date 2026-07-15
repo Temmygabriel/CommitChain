@@ -1,5 +1,6 @@
 // CommitChain — GenLayer Contract Utils
-// Session 3
+// Updated: removed owner_address from submitProof (now authenticated on-chain
+// via gl.message.sender_address — the tx signer is the proof author)
 
 import { createClient, createAccount } from "genlayer-js";
 import { studionet } from "genlayer-js/chains";
@@ -63,7 +64,6 @@ export async function writeContractWithReturn(
     try {
       const client = makeClient(account);
       console.log(`[cc] writeContractWithReturn attempt ${attempt}/${MAX_ATTEMPTS}: ${method}`);
-      // simulateWriteContract gets the return value (commitment ID)
       const returnValue = await client.simulateWriteContract({
         address: CONTRACT_ADDRESS,
         functionName: method,
@@ -131,16 +131,17 @@ export async function createCommitment(
   ]);
 }
 
+// CHANGED: owner_address removed — the contract now reads gl.message.sender_address
+// and checks it against the stored owner. Passing it externally was the spoofing
+// vulnerability the reviewer flagged.
 export async function submitProof(
   account: ReturnType<typeof createAccount>,
   commitmentId: string,
-  ownerAddress: string,
   proofText: string,
   proofLink: string
 ): Promise<void> {
   return writeContract(account, "submit_proof", [
     commitmentId,
-    ownerAddress,
     proofText,
     proofLink,
   ]);
